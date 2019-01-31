@@ -1,5 +1,7 @@
 imgs-16x16/*
+
 result_imgs/*
+
 model.bin
 
 # Created by https://www.gitignore.io/api/python,visualstudiocode

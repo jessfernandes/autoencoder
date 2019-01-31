@@ -41,20 +41,21 @@ class Noiser():
                 for j in range(img.size(2)):
                     if np.random.random() < self.noise_chance:
                         img[:, i, j] = 0
+        return imgs
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, input_size, output_size, kernel_size, stride, padding):
+    def __init__(self, input_size, output_size):
         super().__init__()
 
         self.conv1 = nn.Conv2d(input_size, output_size,
-                               kernel_size=kernel_size,
-                               stride=stride, padding=padding)
+                               kernel_size=3,
+                               stride=1, padding=1)
         self.bn1 = nn.BatchNorm2d(output_size)
 
         self.conv2 = nn.Conv2d(output_size, output_size,
-                               kernel_size=kernel_size,
-                               stride=stride, padding=padding)
+                               kernel_size=3,
+                               stride=1, padding=1)
         self.bn2 = nn.BatchNorm2d(output_size)
 
         self.conv_transpose = nn.ConvTranspose2d(output_size, output_size,
@@ -71,15 +72,15 @@ class ResidualBlock(nn.Module):
         residual = x
 
         out = self.conv1(x)
-        out = self.bn1(out)
-        out = F.relu(out)
+        # out = self.bn1(out)
+        # out = F.relu(out)
 
-        out = self.conv2(out)
-        out = self.bn2(out)
-        out = F.relu(out)
+        # out = self.conv2(out)
+        # out = self.bn2(out)
+        # out = F.relu(out)
 
         out = self.conv_transpose(out)
-        out = self.bn3(out)
+        # out = self.bn3(out)
 
         out = out + self.conv_transpose_res(residual)
         out = F.relu(out)
@@ -98,11 +99,11 @@ class AutoEncoder(nn.Module):
 
         # decoder
         self.decoder = nn.Sequential(
-            ResidualBlock(7, 64, 3, 1, 1),
+            ResidualBlock(7, 64),
 
-            ResidualBlock(64, 32, 3, 1, 1),
+            ResidualBlock(64, 32),
 
-            ResidualBlock(32, dimensions, 3, 1, 1),
+            ResidualBlock(32, dimensions),
         )
 
     def forward(self, x):
@@ -112,7 +113,7 @@ class AutoEncoder(nn.Module):
 
 
 def train(model, train_data, test_data, epochs, optimiser,
-          criterion, scheduler, model_name='model.bin', L2_factor=0.02):
+          criterion, model_name='model.bin'):
     global device
 
     # try to load model
@@ -131,6 +132,7 @@ def train(model, train_data, test_data, epochs, optimiser,
     noiser = Noiser(0.05)
 
     for epoch in range(initial_epoch, epochs):
+        print('Started epoch {}'.format(epoch))
         start_time = time.perf_counter()
         if epoch != 0:
             torch.save({'epoch': epoch,
@@ -142,17 +144,15 @@ def train(model, train_data, test_data, epochs, optimiser,
 
         train_loss = 0
         with torch.set_grad_enabled(True):
-            scheduler.step()
-            print_error = True
             # set model for training
             model.train()
 
             for imgs, _ in train_data:
                 imgs = imgs.to(device)
 
-                noisy_imgs = noiser(imgs)
+                # noisy_imgs = noiser(imgs)
 
-                output = model(noisy_imgs)
+                output = model(imgs)
 
                 loss = criterion(output, imgs)
 
@@ -161,13 +161,10 @@ def train(model, train_data, test_data, epochs, optimiser,
                 loss.backward()
                 optimiser.step()
 
-                if print_error:
-                    print(list(model.parameters())[0].grad)
-                    print_error = False
-
                 # compute total loss
                 train_loss += loss.item() * imgs.size(0)
 
+        print('Done training for epoch {}'.format(epoch))
         save = True
         val_loss = 0
         with torch.set_grad_enabled(False):
@@ -266,8 +263,8 @@ def gen_metadataset(model, model_name, dataset_folders):
 
 
 # size = (224, 224)
-size = (112, 112)
-# size = (56, 56)
+# size = (112, 112)
+size = (56, 56)
 dimensions = 3
 
 transformations = (
@@ -295,7 +292,6 @@ autoencoder = AutoEncoder()
 
 optimiser = optim.Adam(autoencoder.parameters(), lr=0.01, weight_decay=0.01)
 criterion = nn.MSELoss()
-scheduler = optim.lr_scheduler.CosineAnnealingLR(optimiser, epochs)
 
 train(autoencoder, train_data, val_data, epochs=epochs,
-      optimiser=optimiser, criterion=criterion, scheduler=scheduler, model_name=model_name)
+      optimiser=optimiser, criterion=criterion, model_name=model_name)
