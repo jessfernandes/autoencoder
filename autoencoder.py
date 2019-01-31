@@ -32,8 +32,17 @@ class PrintLayer(nn.Module):
 
 
 class Noiser():
+    def __init__(self, noise_chance):
+        self.noise_chance = noise_chance
+
     def __call__(self, imgs):
-        pass
+        for img in imgs:
+            for i in range(img.size(1)):
+                for j in range(img.size(2)):
+                    if np.random.random() < self.noise_chance:
+                        img[:, i, j] = 0
+            print(img)
+            exit()
 
 
 class ResidualBlock(nn.Module):
@@ -91,13 +100,11 @@ class AutoEncoder(nn.Module):
 
         # decoder
         self.decoder = nn.Sequential(
-            # PrintLayer(),
             ResidualBlock(7, 64, 3, 1, 1),
 
             ResidualBlock(64, 32, 3, 1, 1),
 
             ResidualBlock(32, dimensions, 3, 1, 1),
-            # nn.Sigmoid()
         )
 
     def forward(self, x):
@@ -123,6 +130,8 @@ def train(model, train_data, test_data, epochs, optimiser,
         initial_epoch = 0
         best_loss = None
 
+    noiser = Noiser(0.05)
+
     for epoch in range(initial_epoch, epochs):
         start_time = time.perf_counter()
         if epoch != 0:
@@ -143,7 +152,9 @@ def train(model, train_data, test_data, epochs, optimiser,
             for imgs, _ in train_data:
                 imgs = imgs.to(device)
 
-                output = model(imgs)
+                noisy_imgs = noiser(imgs)
+
+                output = model(noisy_imgs)
 
                 loss = criterion(output, imgs)
 
