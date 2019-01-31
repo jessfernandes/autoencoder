@@ -41,8 +41,6 @@ class Noiser():
                 for j in range(img.size(2)):
                     if np.random.random() < self.noise_chance:
                         img[:, i, j] = 0
-            print(img)
-            exit()
 
 
 class ResidualBlock(nn.Module):
