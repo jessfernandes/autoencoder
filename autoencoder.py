@@ -1,5 +1,6 @@
 import os
 import time
+from contextlib import suppress
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -12,14 +13,16 @@ from torchvision import datasets, models, transforms
 
 def save_img(img, name):
     global dimensions
+    global means
 
     npimg = img.numpy()
+    # npimg[0] = npimg[0] * stds[0] + means[0]
+    # npimg[1] = npimg[1] * stds[1] + means[1]
+    # npimg[2] = npimg[2] * stds[2] + means[2]
+
     npimg = np.transpose(npimg, (1, 2, 0))
 
-    if dimensions == 1:
-        npimg = npimg.reshape(*size)
-        npimg = np.stack((npimg,) * 3, axis=-1)
-    plt.imsave(name, npimg, cmap='gray')
+    plt.imsave(name, npimg)
 
 
 class PrintLayer(nn.Module):
@@ -31,59 +34,179 @@ class PrintLayer(nn.Module):
         return x
 
 
-class Noiser():
+class GaussianNoiser():
+    def __init__(self, noise_amount):
+        self.noise_amount = noise_amount
+
+    def __call__(self, imgs):
+        noisy_imgs = imgs.clone()
+
+        # gaussian noise
+        noise = torch.rand(noisy_imgs.size())
+
+        noisy_imgs += self.noise_amount * noise
+
+        # clamp between 0 and 1
+        noisy_imgs.clamp_(0, 1)
+
+        return noisy_imgs
+
+
+class DropPixelNoiser():
     def __init__(self, noise_chance):
         self.noise_chance = noise_chance
 
     def __call__(self, imgs):
-        for img in imgs:
+        noisy_imgs = imgs.clone()
+        # noise described in the denoising autoencoder paper from bengio
+        for img in noisy_imgs:
             for i in range(img.size(1)):
                 for j in range(img.size(2)):
                     if np.random.random() < self.noise_chance:
                         img[:, i, j] = 0
-        return imgs
+        return noisy_imgs
 
 
-class ResidualBlock(nn.Module):
-    def __init__(self, input_size, output_size):
+class EncoderBlock(nn.Module):
+    def __init__(self, input_size, output_size,
+                 last_activation, apply_bn_last=True):
         super().__init__()
 
+        self.apply_bn_last = apply_bn_last
+
         self.conv1 = nn.Conv2d(input_size, output_size,
-                               kernel_size=3,
-                               stride=1, padding=1)
+                               kernel_size=5,
+                               stride=1, padding=2)
         self.bn1 = nn.BatchNorm2d(output_size)
 
         self.conv2 = nn.Conv2d(output_size, output_size,
-                               kernel_size=3,
-                               stride=1, padding=1)
+                               kernel_size=5,
+                               stride=1, padding=2)
         self.bn2 = nn.BatchNorm2d(output_size)
 
-        self.conv_transpose = nn.ConvTranspose2d(output_size, output_size,
-                                                 kernel_size=2,
-                                                 stride=2, padding=0)
+        self.conv3 = nn.Conv2d(output_size, output_size,
+                               kernel_size=3,
+                               stride=1, padding=1)
         self.bn3 = nn.BatchNorm2d(output_size)
 
-        self.conv_transpose_res = nn.ConvTranspose2d(input_size, output_size,
-                                                     kernel_size=2,
-                                                     stride=2, padding=0)
+        self.conv4 = nn.Conv2d(output_size, output_size,
+                               kernel_size=3,
+                               stride=1, padding=1)
         self.bn4 = nn.BatchNorm2d(output_size)
 
+        self.conv5 = nn.Conv2d(output_size, output_size,
+                               kernel_size=3,
+                               stride=1, padding=1)
+        self.bn5 = nn.BatchNorm2d(output_size)
+
+        self.downsampler = nn.Conv2d(output_size, output_size,
+                                     kernel_size=2,
+                                     stride=2, padding=0)
+
+        if apply_bn_last:
+            self.bn_down = nn.BatchNorm2d(output_size)
+
+        self.last_activation = last_activation()
+
     def forward(self, x):
-        residual = x
-
         out = self.conv1(x)
-        # out = self.bn1(out)
-        # out = F.relu(out)
-
-        # out = self.conv2(out)
-        # out = self.bn2(out)
-        # out = F.relu(out)
-
-        out = self.conv_transpose(out)
-        # out = self.bn3(out)
-
-        out = out + self.conv_transpose_res(residual)
+        out = self.bn1(out)
         out = F.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = F.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+        out = F.relu(out)
+
+        out = self.conv4(out)
+        out = self.bn4(out)
+        out = F.relu(out)
+
+        out = self.conv5(out)
+        out = self.bn5(out)
+        out = F.relu(out)
+
+        out = self.downsampler(out)
+        if self.apply_bn_last:
+            out = self.bn_down(out)
+        out = self.last_activation(out)
+
+        return out
+
+
+class DecoderBlock(nn.Module):
+    def __init__(self, input_size, output_size,
+                 last_activation, apply_bn_last=True):
+        super().__init__()
+
+        self.apply_bn_last = apply_bn_last
+        self.last_activation = last_activation
+
+        self.conv1 = nn.Conv2d(input_size, output_size,
+                               kernel_size=5,
+                               stride=1, padding=2)
+        self.bn1 = nn.BatchNorm2d(output_size)
+
+        self.conv2 = nn.Conv2d(output_size, output_size,
+                               kernel_size=5,
+                               stride=1, padding=2)
+        self.bn2 = nn.BatchNorm2d(output_size)
+
+        self.conv3 = nn.Conv2d(output_size, output_size,
+                               kernel_size=3,
+                               stride=1, padding=1)
+        self.bn3 = nn.BatchNorm2d(output_size)
+
+        self.conv4 = nn.Conv2d(output_size, output_size,
+                               kernel_size=3,
+                               stride=1, padding=1)
+        self.bn4 = nn.BatchNorm2d(output_size)
+
+        self.conv5 = nn.Conv2d(output_size, output_size,
+                               kernel_size=3,
+                               stride=1, padding=1)
+        self.bn5 = nn.BatchNorm2d(output_size)
+
+        self.upsampler = nn.ConvTranspose2d(output_size, output_size,
+                                            kernel_size=2,
+                                            stride=2, padding=0)
+        if apply_bn_last:
+            self.bn_up = nn.BatchNorm2d(output_size)
+
+        if last_activation is not None:
+            self.last_activation = last_activation()
+
+    def forward(self, x):
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = F.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = F.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+        out = F.relu(out)
+
+        out = self.conv4(out)
+        out = self.bn4(out)
+        out = F.relu(out)
+
+        out = self.conv5(out)
+        out = self.bn5(out)
+        out = F.relu(out)
+
+        out = self.upsampler(out)
+        if self.apply_bn_last:
+            out = self.bn_up(out)
+
+        if self.last_activation is not None:
+            out = self.last_activation(out)
+
         return out
 
 
@@ -91,19 +214,23 @@ class AutoEncoder(nn.Module):
     def __init__(self):
         super().__init__()
 
-        # encoder
-        self.encoder = nn.Sequential(*list(models.resnet50().children())[:-4],
-                                     nn.Conv2d(512, 7, kernel_size=1, stride=1))
+        self.encoder = nn.Sequential(
+            EncoderBlock(3, 16, last_activation=nn.ReLU),
+
+            EncoderBlock(16, 8, last_activation=nn.ReLU),
+
+            EncoderBlock(8, 4, last_activation=nn.ReLU)
+        )
 
         # 7 x 7 x 7 representation
 
-        # decoder
         self.decoder = nn.Sequential(
-            ResidualBlock(7, 64),
+            DecoderBlock(4, 8, last_activation=nn.ReLU),
 
-            ResidualBlock(64, 32),
+            DecoderBlock(8, 16, last_activation=nn.ReLU),
 
-            ResidualBlock(32, dimensions),
+            DecoderBlock(16, dimensions, last_activation=nn.Sigmoid,
+                         apply_bn_last=False)
         )
 
     def forward(self, x):
@@ -112,10 +239,8 @@ class AutoEncoder(nn.Module):
         return x
 
 
-def train(model, train_data, test_data, epochs, optimiser,
+def train(device, model, train_data, test_data, epochs, optimiser,
           criterion, model_name='model.bin'):
-    global device
-
     # try to load model
     try:
         checkpoint = torch.load(model_name)
@@ -129,8 +254,7 @@ def train(model, train_data, test_data, epochs, optimiser,
         initial_epoch = 0
         best_loss = None
 
-    noiser = Noiser(0.05)
-
+    noiser = GaussianNoiser(0.10)
     for epoch in range(initial_epoch, epochs):
         print('Started epoch {}'.format(epoch))
         start_time = time.perf_counter()
@@ -142,6 +266,7 @@ def train(model, train_data, test_data, epochs, optimiser,
                         'best_model_state_dict': best_model_state_dict,
                         }, model_name)
 
+        save = True
         train_loss = 0
         with torch.set_grad_enabled(True):
             # set model for training
@@ -150,21 +275,31 @@ def train(model, train_data, test_data, epochs, optimiser,
             for imgs, _ in train_data:
                 imgs = imgs.to(device)
 
-                # noisy_imgs = noiser(imgs)
+                noisy_imgs = noiser(imgs)
 
-                output = model(imgs)
+                output = model(noisy_imgs)
 
                 loss = criterion(output, imgs)
+                print(loss)
 
                 # zero gradients per batch
                 optimiser.zero_grad()
                 loss.backward()
                 optimiser.step()
 
+                # name, p = list(model.named_parameters())[-1]
+                # print(name, p.grad)
+
                 # compute total loss
                 train_loss += loss.item() * imgs.size(0)
 
-        print('Done training for epoch {}'.format(epoch))
+                if epoch % 5 == 0 and save:
+                    # sample two images
+                    for j in range(2):
+                        save_img(imgs[j].detach(), 'result_imgs_train/epoch-{}-{}-original.jpg'.format(epoch, j))
+                        save_img(output[j].detach(), 'result_imgs_train/epoch-{}-{}-mod.jpg'.format(epoch, j))
+                    save = False
+
         save = True
         val_loss = 0
         with torch.set_grad_enabled(False):
@@ -184,8 +319,8 @@ def train(model, train_data, test_data, epochs, optimiser,
                 if epoch % 5 == 0 and save:
                     # sample two images
                     for j in range(2):
-                        save_img(imgs[j], 'result_imgs/epoch-{}-{}-original.jpg'.format(epoch, j))
-                        save_img(output[j], 'result_imgs/epoch-{}-{}-mod.jpg'.format(epoch, j))
+                        save_img(imgs[j], 'result_imgs_val/epoch-{}-{}-original.jpg'.format(epoch, j))
+                        save_img(output[j], 'result_imgs_val/epoch-{}-{}-mod.jpg'.format(epoch, j))
                     save = False
 
         train_loss /= len(train_data.dataset)
@@ -203,95 +338,70 @@ def train(model, train_data, test_data, epochs, optimiser,
         print(s)
 
 
-def gen_metadataset(model, model_name, dataset_folders):
-    global size
-    global dimensions
-    global dataset_name
-
-    class ImageFolderWithPaths(datasets.ImageFolder):
-        # override the __getitem__ method. this is the method dataloader calls
-        def __getitem__(self, index):
-            original_tuple = super().__getitem__(index)
-            # the image file path
-            path = self.imgs[index][0]
-            return (path, *original_tuple)
-
-    if dimensions == 1:
-        transformations = (
-            transforms.Compose([
-                transforms.Grayscale(),
-                transforms.Resize(size),
-                transforms.ToTensor()
-            ])
-        )
-    else:
-        transformations = (
-            transforms.Compose([
-                transforms.Resize(size),
-                transforms.ToTensor()
-            ])
-        )
-
-    if model_name in os.listdir():
-        checkpoint = torch.load(model_name)
-        model.load_state_dict(checkpoint['best_model_state_dict'])
-    else:
-        raise Exception('Model not found')
-
-    tensors_with_paths = []
-    with torch.set_grad_enabled(False):
-        model.eval()
-        for folder in dataset_folders:
-            # load folder (train and val)
-            dataset = ImageFolderWithPaths(folder, transformations)
-            data = torch.utils.data.DataLoader(
-                dataset, batch_size=32, shuffle=False, num_workers=4)
-
-            for paths, imgs, _ in data:
-                imgs = imgs.to(device)
-
-                encoded_imgs = model.encoder(imgs)
-                for path, ei in zip(paths, encoded_imgs):
-                    # flatten tensor and append to list
-                    tensors_with_paths.append(
-                        (os.path.basename(path), ei.view(-1).numpy()))
-
-    with open(dataset_name, 'w') as f:
-        for path, tensor in tensors_with_paths:
-            metafeatures = ','.join(str(v) for v in tensor)
-            f.write('{},{}\n'.format(path, metafeatures))
-
-
 # size = (224, 224)
 # size = (112, 112)
 size = (56, 56)
 dimensions = 3
+means = [0.8893, 0.8280, 0.7882]
+stds = [0.0828, 0.0966, 0.1033]
+
 
 transformations = (
     transforms.Compose([
         transforms.Resize(size),
-        transforms.ToTensor()
+        transforms.ToTensor(),
+        # transforms.Normalize(means, stds),
     ])
 )
 
+torch.set_num_threads(4)
 
-folder = 'imgs-16x16'
+folder = 'imgs_partial'
 model_name = 'model.bin'
-epochs = 50
+
+# compute mean and std of images
+
+# from PIL import Image
+
+# folder = 'imgs_partial/train/class'
+# files = os.listdir(folder)
+
+# tensors = []
+# to_tensor = transforms.ToTensor()
+# resizer = transforms.Resize(size)
+
+# for img in files:
+#     img = os.path.join(folder, img)
+#     im = resizer(Image.open(img))
+#     t = to_tensor(im)
+#     tensors.append(t)
+
+# t = torch.stack(tensors)
+# print(torch.mean(t[:, 0]), torch.std(t[:, 0]))
+# print(torch.mean(t[:, 1]), torch.std(t[:, 1]))
+# print(torch.mean(t[:, 2]), torch.std(t[:, 2]))
+# exit()
+
+
+with suppress(Exception):
+    os.remove(model_name)
+
+epochs = 200
 
 # load data and data handler
 train_dataset = datasets.ImageFolder(os.path.join(folder, 'train'), transformations)
-train_data = torch.utils.data.DataLoader(train_dataset, batch_size=64, shuffle=True)
+train_data = torch.utils.data.DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=1)
 
 val_dataset = datasets.ImageFolder(os.path.join(folder, 'val'), transformations)
-val_data = torch.utils.data.DataLoader(val_dataset, batch_size=64, shuffle=True)
+val_data = torch.utils.data.DataLoader(val_dataset, batch_size=32, shuffle=True, num_workers=1)
 
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cpu')
 
 autoencoder = AutoEncoder()
 
-optimiser = optim.Adam(autoencoder.parameters(), lr=0.01, weight_decay=0.01)
+optimiser = optim.Adam(autoencoder.parameters(), lr=0.02)
 criterion = nn.MSELoss()
 
-train(autoencoder, train_data, val_data, epochs=epochs,
+train(device, autoencoder, train_data, val_data, epochs=epochs,
       optimiser=optimiser, criterion=criterion, model_name=model_name)

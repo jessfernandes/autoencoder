@@ -1,6 +1,8 @@
 imgs-16x16/*
 
-result_imgs/*
+result_imgs_train/*
+
+result_imgs_val/*
 
 model.bin
 
